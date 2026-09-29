@@ -1,0 +1,7 @@
+{
+  "name": "ChatTranslator",
+  "description": "Traduz mensagens do chat automaticamente para o seu idioma",
+  "authors": [{ "name": "trickhook", "id": "287781404" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_message_language" }
+}
