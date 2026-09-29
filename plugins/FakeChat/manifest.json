@@ -1,0 +1,7 @@
+{
+  "name": "FakeChat",
+  "description": "Segure a mensagem e edite o texto localmente",
+  "authors": [{ "name": "trickhook", "id": "287781404" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_badge_staff" }
+}
