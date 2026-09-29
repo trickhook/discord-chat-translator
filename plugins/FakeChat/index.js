@@ -92,8 +92,110 @@ function openEditModal(message) {
   }
 }
 
-function restoreOriginal(message) {
+function openImpersonateModal(message) {
   const Sheets = findByProps("openLazy", "hideActionSheet");
+  try {
+    if (Sheets && Sheets.hideActionSheet) Sheets.hideActionSheet();
+  } catch (e) {}
+  let alertKit = null;
+  let modalKit = null;
+  try {
+    alertKit = findByProps("openAlert", "dismissAlert");
+    modalKit = findByProps("AlertModal", "AlertActions");
+  } catch (e) {}
+  if (!alertKit || !modalKit || !modalKit.AlertModal) {
+    showToast("Alertas indisponiveis neste client", { type: "error" });
+    return;
+  }
+  const { openAlert, dismissAlert } = alertKit;
+  const { AlertModal, AlertActionButton } = modalKit;
+  const origAuthor = message.author || {};
+  const defaultName = String(origAuthor.username || origAuthor.globalName || "");
+  const defaultText = "<@" + String(origAuthor.id || "") + "> ";
+  const alertId = "fakechat-fingir-" + message.id + "-" + String(Date.now());
+  const FakeBox = () => {
+    const [nome, setNome] = React.useState(defaultName);
+    const [texto, setTexto] = React.useState(defaultText);
+    return React.createElement(AlertModal, {
+      title: "Fingir mensagem",
+      content: "Envia fake como essa pessoa, so local",
+      extraContent: React.createElement(ReactNative.View, { style: { gap: 8 } },
+        React.createElement(ReactNative.TextInput, {
+          value: nome,
+          onChangeText: setNome,
+          autoFocus: false,
+          placeholder: "Nome a exibir",
+          placeholderTextColor: "#87898c",
+          style: { color: "#dbdee1", backgroundColor: "#2b2d31", borderRadius: 8, padding: 10, minHeight: 44 }
+        }),
+        React.createElement(ReactNative.TextInput, {
+          value: texto,
+          onChangeText: setTexto,
+          multiline: true,
+          autoFocus: true,
+          placeholder: "Mensagem, use @ para mencionar",
+          placeholderTextColor: "#87898c",
+          style: { color: "#dbdee1", backgroundColor: "#2b2d31", borderRadius: 8, padding: 10, minHeight: 80, textAlignVertical: "top" }
+        })
+      ),
+      actions: React.createElement(React.Fragment, null,
+        React.createElement(AlertActionButton, {
+          text: "Enviar",
+          variant: "primary",
+          onPress: () => {
+            const Dispatcher = findByProps("dispatch", "subscribe");
+            const channelId = message.channel_id || message.channelId;
+            const finalName = String(nome || "").trim() || defaultName || "Alguem";
+            const finalText = String(texto || "").trim();
+            if (!finalText) {
+              showToast("Mensagem vazia", { type: "error" });
+              return;
+            }
+            const fakeAuthor = Object.assign({}, origAuthor, { username: finalName, globalName: finalName });
+            const fakeId = "890" + String(Date.now()) + String(Math.floor(Math.random() * 900) + 100);
+            dismissAlert(alertId);
+            try {
+              Dispatcher.dispatch({
+                type: "MESSAGE_CREATE",
+                message: {
+                  id: fakeId,
+                  channel_id: channelId,
+                  channelId: channelId,
+                  author: fakeAuthor,
+                  content: finalText,
+                  timestamp: new Date().toISOString(),
+                  edited_timestamp: null,
+                  type: 0,
+                  flags: 0,
+                  mentions: [],
+                  mention_roles: [],
+                  mention_everyone: false,
+                  pinned: false,
+                  tts: false
+                }
+              });
+              showToast("Fake enviado como " + finalName);
+            } catch (e) {
+              showToast("Falha ao enviar fake", { type: "error" });
+            }
+          }
+        }),
+        React.createElement(AlertActionButton, {
+          text: "Cancelar",
+          variant: "secondary",
+          onPress: () => dismissAlert(alertId)
+        })
+      )
+    });
+  };
+  try {
+    openAlert(alertId, React.createElement(FakeBox, null));
+  } catch (e) {
+    showToast("Falha ao abrir editor", { type: "error" });
+  }
+}
+
+function restoreOriginal(message) {  const Sheets = findByProps("openLazy", "hideActionSheet");
   try {
     if (Sheets && Sheets.hideActionSheet) Sheets.hideActionSheet();
   } catch (e) {}
@@ -152,7 +254,12 @@ function patchMenu() {
             icon: iconSrc ? React.createElement(RowComp.Icon, { source: iconSrc }) : null,
             onPress: () => restoreOriginal(message)
           });
-          const toAdd = isFaked ? [editBtn, undoBtn] : [editBtn];
+          const fingirBtn = React.createElement(RowComp, {
+            label: "Fingir como ele",
+            icon: iconSrc ? React.createElement(RowComp.Icon, { source: iconSrc }) : null,
+            onPress: () => openImpersonateModal(message)
+          });
+          const toAdd = isFaked ? [editBtn, fingirBtn, undoBtn] : [editBtn, fingirBtn];
           let inserted = false;
           for (let gi = 0; gi < groups.length; gi++) {
             let kids = null;
@@ -180,7 +287,7 @@ function Settings() {
   return React.createElement(React.Fragment, null,
     React.createElement(Forms.FormSwitchRow, {
       label: "Ativado",
-      subLabel: "Mostra Editar fake ao segurar mensagem",
+      subLabel: "Mostra opcoes fake ao segurar mensagem",
       value: storage.enabled !== false,
       onValueChange: (v) => { storage.enabled = v; }
     }),
