@@ -6,7 +6,7 @@ Plugin Vendetta / Vencord para traduzir o chat do Discord automaticamente.
 
 1. Copie o link do plugin:
 ```
-https://trickhook.github.io/discord-chat-translator/plugins/ChatTranslator
+https://trickhook.github.io/discord-chat-translator/ChatTranslator
 ```
 2. No Discord com Vendetta, abra Ajustes > Plugins > pressione `+`
 3. Cole o link e confirme
