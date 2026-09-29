@@ -1,1 +1,1 @@
-{"name": "ChatTranslator", "description": "Traduz mensagens do chat automaticamente para o seu idioma", "authors": [{"name": "trickhook", "id": "287781404"}], "main": "index.js", "vendetta": {"icon": "ic_badge_staff"}, "hash": "605801e57a9bc4818d5d17eb0d8ea8db154577200fcba01f1f86dd08da01f5ef"}
+{"name":"ChatTranslator","description":"Traduz mensagens do chat automaticamente para o seu idioma","authors":[{"name":"trickhook","id":"287781404"}],"main":"index.js","vendetta":{"icon":"ic_badge_staff"},"hash":"185968234c8e6901a0b99bc6890e0b79d704aa4032af2d1939c56c08b1e7c315"}

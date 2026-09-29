@@ -1,4 +1,4 @@
-(function(exports,plugin,patcher,metro,common,toasts,storage,components){'use strict';const LANGS = [
+(function(exports,plugin,patcher,metro,common,toasts,alerts,assets,utils,storage,components){'use strict';const LANGS = [
     {
         label: "Portugues",
         value: "pt"
@@ -52,8 +52,8 @@ function settings() {
     }
     return /*#__PURE__*/ common.React.createElement(common.React.Fragment, null, /*#__PURE__*/ common.React.createElement(components.Forms.FormSwitchRow, {
         label: "Traducao automatica",
-        subLabel: "Traduzir mensagens novas assim que chegam",
-        value: plugin.storage.autoTranslate !== false,
+        subLabel: "Desligado = segure a mensagem e use Traduzir",
+        value: plugin.storage.autoTranslate === true,
         onValueChange: function(v) {
             plugin.storage.autoTranslate = v;
         }
@@ -121,9 +121,9 @@ function settings() {
     }));
 }const defaults = {
     targetLang: "pt",
-    autoTranslate: true,
+    autoTranslate: false,
     showOriginal: true,
-    translateSelf: false,
+    translateSelf: true,
     ignoreBots: true,
     engine: "google"
 };
@@ -131,11 +131,10 @@ for (const k of Object.keys(defaults)){
     if (plugin.storage[k] === undefined) plugin.storage[k] = defaults[k];
 }
 let UserStore = null;
-let MessageStore = null;
-let ChannelStore = null;
 const cache = new Map();
 const done = new Set();
 const pending = new Set();
+const patches = [];
 function cacheKey(text, lang) {
     return lang + "::" + text;
 }
@@ -183,6 +182,77 @@ async function translateText(text) {
     }
     return out;
 }
+function cleanSource(input) {
+    const raw = typeof input === "string" ? input : input && input.content || "";
+    return String(raw).split("\n\u200b\u200b")[0].trim();
+}
+function sleep(ms) {
+    return new Promise(function(r) {
+        return setTimeout(r, ms);
+    });
+}
+async function forceRefresh(channelId, messageId, content, embeds) {
+    const Dispatcher = metro.findByProps("dispatch", "subscribe");
+    if (!Dispatcher || !channelId || !messageId) return;
+    Dispatcher.dispatch({
+        type: "MESSAGE_UPDATE",
+        message: {
+            id: messageId,
+            channel_id: channelId,
+            content: content + " ",
+            embeds: embeds || []
+        }
+    });
+    await sleep(60);
+    Dispatcher.dispatch({
+        type: "MESSAGE_UPDATE",
+        message: {
+            id: messageId,
+            channel_id: channelId,
+            content: content,
+            embeds: embeds || []
+        }
+    });
+}
+function applyToChat(message, translated) {
+    const src = cleanSource(message);
+    if (!translated || !translated.trim()) return;
+    const channelId = message.channel_id || message.channelId;
+    const final = plugin.storage.showOriginal ? src + "\n\u200b\u200b" + translated : translated;
+    done.add(message.id);
+    forceRefresh(channelId, message.id, final, message.embeds);
+}
+function runManualTranslate(message) {
+    const ActionSheet = metro.findByProps("openLazy", "hideActionSheet");
+    try {
+        if (ActionSheet && ActionSheet.hideActionSheet) ActionSheet.hideActionSheet();
+    } catch (e) {}
+    const src = cleanSource(message);
+    if (!src) {
+        toasts.showToast("Mensagem vazia", {
+            type: "error"
+        });
+        return;
+    }
+    toasts.showToast("Traduzindo...", {
+        type: "open"
+    });
+    translateText(src).then(function(t) {
+        alerts.showConfirmationAlert({
+            title: "Traducao",
+            content: t,
+            confirmText: "Aplicar no chat",
+            cancelText: "Fechar",
+            onConfirm: function() {
+                return applyToChat(message, t);
+            }
+        });
+    }).catch(function(e) {
+        toasts.showToast("Falha ao traduzir: " + String(e && e.message || e).slice(0, 80), {
+            type: "error"
+        });
+    });
+}
 function shouldSkip(message) {
     if (!message || typeof message.content !== "string") return true;
     if (!message.content.trim()) return true;
@@ -194,50 +264,95 @@ function shouldSkip(message) {
     if (message.content.includes("\n\u200b\u200b")) return true;
     return false;
 }
-function applyTranslation(message, translated) {
-    if (!translated || !translated.trim()) return;
-    if (translated.trim().toLowerCase() === message.content.trim().toLowerCase()) return;
-    message._ctOriginal = message.content;
-    message._ctTranslated = translated;
-    if (plugin.storage.showOriginal) {
-        message.content = message._ctOriginal + "\n\u200b\u200b" + translated;
-    } else {
-        message.content = translated;
-    }
-    done.add(message.id);
-}
-async function handleMessage(channelId, message) {
+async function handleMessage(message) {
     if (!plugin.storage.autoTranslate) return;
     if (!message) return;
-    if (!UserStore) UserStore = metro.findByStoreName("UserStore");
+    if (!UserStore) {
+        try {
+            UserStore = metro.findByStoreName("UserStore");
+        } catch (e) {}
+    }
     if (shouldSkip(message)) return;
     pending.add(message.id);
     try {
-        const t = await translateText(message.content);
-        applyTranslation(message, t);
-        common.FluxDispatcher.dispatch({
-            type: "MESSAGE_UPDATE",
-            message: message
-        });
+        const t = await translateText(cleanSource(message));
+        applyToChat(message, t);
     } catch (e) {
-        toasts.showToast("Falha ao traduzir: " + String(e.message || e).slice(0, 80), {
+        toasts.showToast("Falha ao traduzir: " + String(e && e.message || e).slice(0, 80), {
             type: "error"
         });
     } finally{
         pending.delete(message.id);
     }
 }
-const patches = [];
-function translateManually(message) {
-    if (!message || typeof message.content !== "string") return Promise.resolve("");
-    const src = message._ctOriginal || message.content.split("\n\u200b\u200b")[0];
-    return translateText(src).then(function(t) {
-        applyTranslation(message, t);
-        common.FluxDispatcher.dispatch({
-            type: "MESSAGE_UPDATE",
-            message
-        });
-        return t;
+let sheetUnpatch = null;
+function patchMessageMenu() {
+    let ActionSheet = null;
+    let RowComp = null;
+    try {
+        ActionSheet = metro.findByProps("openLazy", "hideActionSheet");
+        const found = metro.findByProps("ActionSheetRow");
+        RowComp = found && found.ActionSheetRow || null;
+    } catch (e) {}
+    if (!ActionSheet || !RowComp) return null;
+    return patcher.before("openLazy", ActionSheet, function([comp, args, msg]) {
+        if (args !== "MessageLongPressActionSheet") return;
+        if (!msg || !msg.message) return;
+        const message = msg.message;
+        if (!message.content || !String(message.content).trim()) return;
+        try {
+            comp.then(function(instance) {
+                const unpatch = patcher.after("default", instance, function(_a, component) {
+                    common.React.useEffect(function() {
+                        return function() {
+                            try {
+                                unpatch();
+                            } catch (e) {}
+                        };
+                    }, []);
+                    let groups = null;
+                    try {
+                        groups = utils.findInReactTree(component, function(c) {
+                            return Array.isArray(c) && c[0] && c[0].type && c[0].type.name === "ActionSheetRowGroup";
+                        });
+                    } catch (e) {}
+                    if (!groups || !groups.length) return;
+                    let iconSrc = null;
+                    try {
+                        iconSrc = assets.getAssetIDByName("ic_translate_24px") || assets.getAssetIDByName("ic_chat_24px");
+                    } catch (e) {}
+                    const btn = common.React.createElement(RowComp, {
+                        label: "Traduzir",
+                        icon: iconSrc ? common.React.createElement(RowComp.Icon, {
+                            source: iconSrc
+                        }) : null,
+                        onPress: function() {
+                            return runManualTranslate(message);
+                        }
+                    });
+                    let inserted = false;
+                    for(let gi = 0; gi < groups.length; gi++){
+                        let kids = null;
+                        try {
+                            kids = utils.findInReactTree(groups[gi], function(c) {
+                                return Array.isArray(c) && c.some(function(ch) {
+                                    return ch && ch.type && ch.type.name === "ActionSheetRow";
+                                });
+                            });
+                        } catch (e) {}
+                        if (!kids) continue;
+                        kids.unshift(btn);
+                        inserted = true;
+                        break;
+                    }
+                    if (!inserted) {
+                        try {
+                            groups.unshift(common.React.createElement(RowComp.Group, null, btn));
+                        } catch (e) {}
+                    }
+                });
+            });
+        } catch (e) {}
     });
 }
 var index = {
@@ -249,6 +364,10 @@ var index = {
             } catch (e) {}
         }
         patches.length = 0;
+        try {
+            if (sheetUnpatch) sheetUnpatch();
+        } catch (e) {}
+        sheetUnpatch = null;
         cache.clear();
         done.clear();
         pending.clear();
@@ -256,31 +375,21 @@ var index = {
     onLoad () {
         try {
             UserStore = metro.findByStoreName("UserStore");
-            MessageStore = metro.findByStoreName("MessageStore");
-            ChannelStore = metro.findByStoreName("ChannelStore");
+        } catch (e) {}
+        try {
+            sheetUnpatch = patchMessageMenu();
+            if (sheetUnpatch) patches.push(sheetUnpatch);
         } catch (e) {}
         patches.push(patcher.before("dispatch", common.FluxDispatcher, function(args) {
             const ev = args[0];
             if (!ev || !ev.type) return args;
             if (ev.type === "MESSAGE_CREATE") {
                 const m = ev.message;
-                if (m && m.content) {
-                    setTimeout(function() {
-                        return handleMessage(m.channel_id || m.channelId, m);
-                    }, 50);
-                }
-            }
-            if (ev.type === "MESSAGE_UPDATE") {
-                const m = ev.message;
-                if (m && m.content && !m._ctTranslated && !done.has(m.id)) {
-                    if (plugin.storage.autoTranslate) {
-                        setTimeout(function() {
-                            return handleMessage(m.channel_id || m.channelId, m);
-                        }, 50);
-                    }
-                }
+                if (m && m.content && plugin.storage.autoTranslate) setTimeout(function() {
+                    return handleMessage(m);
+                }, 80);
             }
             return args;
         }));
     }
-};exports.default=index;exports.translateManually=translateManually;exports.translateText=translateText;Object.defineProperty(exports,'__esModule',{value:true});return exports;})({},vendetta.plugin,vendetta.patcher,vendetta.metro,vendetta.metro.common,vendetta.ui.toasts,vendetta.storage,vendetta.ui.components);
+};exports.default=index;exports.translateText=translateText;Object.defineProperty(exports,'__esModule',{value:true});return exports;})({},vendetta.plugin,vendetta.patcher,vendetta.metro,vendetta.metro.common,vendetta.ui.toasts,vendetta.ui.alerts,vendetta.ui.assets,vendetta.utils,vendetta.storage,vendetta.ui.components);
