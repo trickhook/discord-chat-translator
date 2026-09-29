@@ -1,0 +1,7 @@
+{
+  "name": "EmbedFake",
+  "description": "Crie preview de link falso em qualquer mensagem",
+  "authors": [{ "name": "trickhook", "id": "287781404" }],
+  "main": "index.js",
+  "vendetta": { "icon": "ic_badge_staff" }
+}
