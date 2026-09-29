@@ -2,8 +2,6 @@
 
 Plugin Vendetta / Vencord para traduzir o chat do Discord automaticamente.
 
-Inspirado em: https://meqativ.github.io/dumsane/NoDelete/
-
 ## Instalar
 
 1. Copie o link do plugin:
