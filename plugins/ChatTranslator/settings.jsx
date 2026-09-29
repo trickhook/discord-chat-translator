@@ -32,8 +32,8 @@ export default () => {
     <>
       <Forms.FormSwitchRow
         label="Traducao automatica"
-        subLabel="Traduzir mensagens novas assim que chegam"
-        value={storage.autoTranslate !== false}
+        subLabel="Desligado = segure a mensagem e use Traduzir"
+        value={storage.autoTranslate === true}
         onValueChange={(v) => { storage.autoTranslate = v; }}
       />
       <Forms.FormSwitchRow

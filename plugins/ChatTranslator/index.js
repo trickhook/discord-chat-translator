@@ -1,15 +1,18 @@
 import { storage } from "@vendetta/plugin";
-import { before as patchBefore } from "@vendetta/patcher";
-import { findByStoreName } from "@vendetta/metro";
+import { before as patchBefore, after as patchAfter } from "@vendetta/patcher";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { FluxDispatcher, React } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
+import { showConfirmationAlert } from "@vendetta/ui/alerts";
+import { getAssetIDByName } from "@vendetta/ui/assets";
+import { findInReactTree } from "@vendetta/utils";
 import settings from "./settings.jsx";
 
 const defaults = {
   targetLang: "pt",
-  autoTranslate: true,
+  autoTranslate: false,
   showOriginal: true,
-  translateSelf: false,
+  translateSelf: true,
   ignoreBots: true,
   engine: "google"
 };
@@ -19,11 +22,10 @@ for (const k of Object.keys(defaults)) {
 }
 
 let UserStore = null;
-let MessageStore = null;
-let ChannelStore = null;
 const cache = new Map();
 const done = new Set();
 const pending = new Set();
+const patches = [];
 
 function cacheKey(text, lang) {
   return lang + "::" + text;
@@ -74,6 +76,62 @@ export async function translateText(text) {
   return out;
 }
 
+function cleanSource(input) {
+  const raw = typeof input === "string" ? input : (input && input.content) || "";
+  return String(raw).split("\n\u200b\u200b")[0].trim();
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function forceRefresh(channelId, messageId, content, embeds) {
+  const Dispatcher = findByProps("dispatch", "subscribe");
+  if (!Dispatcher || !channelId || !messageId) return;
+  Dispatcher.dispatch({
+    type: "MESSAGE_UPDATE",
+    message: { id: messageId, channel_id: channelId, content: content + " ", embeds: embeds || [] }
+  });
+  await sleep(60);
+  Dispatcher.dispatch({
+    type: "MESSAGE_UPDATE",
+    message: { id: messageId, channel_id: channelId, content: content, embeds: embeds || [] }
+  });
+}
+
+function applyToChat(message, translated) {
+  const src = cleanSource(message);
+  if (!translated || !translated.trim()) return;
+  const channelId = message.channel_id || message.channelId;
+  const final = storage.showOriginal ? src + "\n\u200b\u200b" + translated : translated;
+  done.add(message.id);
+  forceRefresh(channelId, message.id, final, message.embeds);
+}
+
+function runManualTranslate(message) {
+  const ActionSheet = findByProps("openLazy", "hideActionSheet");
+  try {
+    if (ActionSheet && ActionSheet.hideActionSheet) ActionSheet.hideActionSheet();
+  } catch (e) {}
+  const src = cleanSource(message);
+  if (!src) {
+    showToast("Mensagem vazia", { type: "error" });
+    return;
+  }
+  showToast("Traduzindo...", { type: "open" });
+  translateText(src).then((t) => {
+    showConfirmationAlert({
+      title: "Traducao",
+      content: t,
+      confirmText: "Aplicar no chat",
+      cancelText: "Fechar",
+      onConfirm: () => applyToChat(message, t)
+    });
+  }).catch((e) => {
+    showToast("Falha ao traduzir: " + String((e && e.message) || e).slice(0, 80), { type: "error" });
+  });
+}
+
 function shouldSkip(message) {
   if (!message || typeof message.content !== "string") return true;
   if (!message.content.trim()) return true;
@@ -86,48 +144,83 @@ function shouldSkip(message) {
   return false;
 }
 
-function applyTranslation(message, translated) {
-  if (!translated || !translated.trim()) return;
-  if (translated.trim().toLowerCase() === message.content.trim().toLowerCase()) return;
-  message._ctOriginal = message.content;
-  message._ctTranslated = translated;
-  if (storage.showOriginal) {
-    message.content = message._ctOriginal + "\n\u200b\u200b" + translated;
-  } else {
-    message.content = translated;
-  }
-  done.add(message.id);
-}
-
-async function handleMessage(channelId, message) {
+async function handleMessage(message) {
   if (!storage.autoTranslate) return;
   if (!message) return;
-  if (!UserStore) UserStore = findByStoreName("UserStore");
+  if (!UserStore) {
+    try {
+      UserStore = findByStoreName("UserStore");
+    } catch (e) {}
+  }
   if (shouldSkip(message)) return;
   pending.add(message.id);
   try {
-    const t = await translateText(message.content);
-    applyTranslation(message, t);
-    FluxDispatcher.dispatch({
-      type: "MESSAGE_UPDATE",
-      message: message
-    });
+    const t = await translateText(cleanSource(message));
+    applyToChat(message, t);
   } catch (e) {
-    showToast("Falha ao traduzir: " + String(e.message || e).slice(0, 80), { type: "error" });
+    showToast("Falha ao traduzir: " + String((e && e.message) || e).slice(0, 80), { type: "error" });
   } finally {
     pending.delete(message.id);
   }
 }
 
-const patches = [];
+let sheetUnpatch = null;
 
-export function translateManually(message) {
-  if (!message || typeof message.content !== "string") return Promise.resolve("");
-  const src = message._ctOriginal || message.content.split("\n\u200b\u200b")[0];
-  return translateText(src).then((t) => {
-    applyTranslation(message, t);
-    FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
-    return t;
+function patchMessageMenu() {
+  let ActionSheet = null;
+  let RowComp = null;
+  try {
+    ActionSheet = findByProps("openLazy", "hideActionSheet");
+    const found = findByProps("ActionSheetRow");
+    RowComp = (found && found.ActionSheetRow) || null;
+  } catch (e) {}
+  if (!ActionSheet || !RowComp) return null;
+  return patchBefore("openLazy", ActionSheet, ([comp, args, msg]) => {
+    if (args !== "MessageLongPressActionSheet") return;
+    if (!msg || !msg.message) return;
+    const message = msg.message;
+    if (!message.content || !String(message.content).trim()) return;
+    try {
+      comp.then((instance) => {
+        const unpatch = patchAfter("default", instance, (_a, component) => {
+          React.useEffect(() => () => {
+            try {
+              unpatch();
+            } catch (e) {}
+          }, []);
+          let groups = null;
+          try {
+            groups = findInReactTree(component, (c) => Array.isArray(c) && c[0] && c[0].type && c[0].type.name === "ActionSheetRowGroup");
+          } catch (e) {}
+          if (!groups || !groups.length) return;
+          let iconSrc = null;
+          try {
+            iconSrc = getAssetIDByName("ic_translate_24px") || getAssetIDByName("ic_chat_24px");
+          } catch (e) {}
+          const btn = React.createElement(RowComp, {
+            label: "Traduzir",
+            icon: iconSrc ? React.createElement(RowComp.Icon, { source: iconSrc }) : null,
+            onPress: () => runManualTranslate(message)
+          });
+          let inserted = false;
+          for (let gi = 0; gi < groups.length; gi++) {
+            let kids = null;
+            try {
+              kids = findInReactTree(groups[gi], (c) => Array.isArray(c) && c.some((ch) => ch && ch.type && ch.type.name === "ActionSheetRow"));
+            } catch (e) {}
+            if (!kids) continue;
+            kids.unshift(btn);
+            inserted = true;
+            break;
+          }
+          if (!inserted) {
+            try {
+              groups.unshift(React.createElement(RowComp.Group, null, btn));
+            } catch (e) {}
+          }
+        });
+      });
+    } catch (e) {}
   });
 }
 
@@ -140,6 +233,10 @@ export default {
       } catch (e) {}
     }
     patches.length = 0;
+    try {
+      if (sheetUnpatch) sheetUnpatch();
+    } catch (e) {}
+    sheetUnpatch = null;
     cache.clear();
     done.clear();
     pending.clear();
@@ -147,8 +244,10 @@ export default {
   onLoad() {
     try {
       UserStore = findByStoreName("UserStore");
-      MessageStore = findByStoreName("MessageStore");
-      ChannelStore = findByStoreName("ChannelStore");
+    } catch (e) {}
+    try {
+      sheetUnpatch = patchMessageMenu();
+      if (sheetUnpatch) patches.push(sheetUnpatch);
     } catch (e) {}
     patches.push(
       patchBefore("dispatch", FluxDispatcher, (args) => {
@@ -156,17 +255,7 @@ export default {
         if (!ev || !ev.type) return args;
         if (ev.type === "MESSAGE_CREATE") {
           const m = ev.message;
-          if (m && m.content) {
-            setTimeout(() => handleMessage(m.channel_id || m.channelId, m), 50);
-          }
-        }
-        if (ev.type === "MESSAGE_UPDATE") {
-          const m = ev.message;
-          if (m && m.content && !m._ctTranslated && !done.has(m.id)) {
-            if (storage.autoTranslate) {
-              setTimeout(() => handleMessage(m.channel_id || m.channelId, m), 50);
-            }
-          }
+          if (m && m.content && storage.autoTranslate) setTimeout(() => handleMessage(m), 80);
         }
         return args;
       })
